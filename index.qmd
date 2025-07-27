@@ -1,0 +1,136 @@
+---
+title: "[InvisibleInk]{style='color: #ffffff;'}"
+subtitle: "Differentially Private Text Generation with LLMs"
+institute: "Indian Institute of Technology, Madras"
+author: "Vivek Sivaramakrishnan"
+format: 
+    revealjs:
+        theme: [simple, theme.scss]
+        incremental: true
+        mermaid:
+            theme: dark
+---
+
+# Preliminaries
+
+- Language Models and Decoding
+- Differential Privacy (DP)
+- Prior state-of-the-art DP Text generation
+
+## ~~L~~LMs and Decoding
+
+- Sample next word $x_t \sim P(\cdot \ | \ \overbrace{q, r, x_{<t}}^{\text{context}})$. Terminate when $x_t = \texttt{<eos>}$
+- Assumption; we have access to the model logits $\phi(\cdot \ | \text{context})$. Generally $P(\cdot \ | \text{context}) \propto \text{exp}(\phi(\cdot \ | \text{context}))$ (softmax)
+- Might sample degenerate text due to over-representation of low probability tokens (words) (since $|\text{Vocabulary}| \sim O(10^5)$)
+
+---
+
+Solutions:
+
+:::{.fragment}
+
+**Temperature ($\tau$) Scaling:**
+
+$$
+Q_\tau(x_t) (x_t | \ \text{context}) \propto \text{exp}( \frac{1}{\tau} \phi(\cdot \ | \text{context}))
+$$
+
+:::
+
+:::{.fragment}
+
+**Top-k Sampling:**
+
+$$
+Q_\text{top-k} (x_t | \ \text{context}) \propto \mathbb{1}(x_t \in V_k) \times  P(\cdot \ | \text{context})
+$$
+
+where $V_k \in V$ is the set of top-k tokens with the highest logits.
+
+:::
+
+## Differential Privacy
+
+::: {.fragment}
+
+An algorithm $\mathcal{A}$ is said to be $\rho$-zCDP (zero-concentrated differentially private) if
+
+$$
+D_\alpha (\mathcal{A}(q, R) | \mathcal{A}(q, R')) \leq \rho \alpha \ \forall \alpha > 1, R' \text{ s.t } R \simeq R'
+$$
+
+where;
+
+- $D_\alpha$ denotes the $\alpha$--Rényi divergence
+-  An adjacent $R'$ ($R \simeq R'$) is obtained by replacing one element of $R$ by the empty string (**replace-by-null** adjacency)
+
+:::
+
+::: {.fragment}
+**GOAL**: Come up with an $\mathcal{A}$
+:::
+
+## Amin et al. DP Text Generation
+
+Given a query $Q$ and sensitive references $R$ $(|R| = B)$, do the following to generate $x_t$:
+
+- Obtain next token logits $\phi_i = \phi(\cdot \ |q, r_i, x_{<t}) \in \mathcal{R}^{|V|}$ for each $i \in [B]$
+- Clip and aggregate to obtain $\bar{\phi} = \frac{1}{B}\sum_{i=1}^B \text{clip}_C(\phi_i)$
+- Sample $x_t$ from $Q (x_t | q,R, x_{<t} ) \propto \text{exp}( \frac{1}{\tau} \bar{\phi}(x_t))$ where $\tau = O\left(\frac{C}{B\sqrt{\rho}}\right)$ ($x_t$ can be shown to be a $\rho-$zCDP token)
+
+---
+
+### Some problems
+
+- **Compute intensive**; $C$ should be sufficiently large ($\approx 10$) $\implies B$ must be large $(> O(50)) \implies$ generating each private token requires $B$ LLM calls!
+- **Data dependent DP**; Amin et al. sample from $\phi_{\text{pub}} = \phi(\cdot \ |q, x_{<t})$ if it is close enough to $\bar{\phi}$, which yields a data-dependent DP guarantee, making it hard to calibrate the noise level to a desired privacy guarantee in advance.
+
+# InvisibleInk
+
+Attacks *Amin et al.* problems by:
+
+- **DClip**; yields a small $C$, leading to a small compute cost $B$
+- **Truncated top-$k+$ Sampling**; gives a direct zCDP bound
+
+## DClip: A targeted clipping function {.smaller}
+
+- Recall $\phi_{\text{pub}} = \phi(\cdot \ |q, x_{<t})$, $\phi_{i} = \phi(\cdot \ |q, r_i, x_{<t})$
+- Hence the *private information* contributed by $r_i$ is $\phi_i - \phi_{\text{pub}}$
+- Instead of doing $\bar{\phi} = \frac{1}{B}\sum_{i=1}^B \text{clip}_C(\phi_i)$, we shall clip just the private information contributed by each $r_i$,..
+- ...and add to $\phi_{\text{pub}}$ i.e.;
+
+::: {.fragment}
+$$
+\text{DClip}_C(\phi_i, \phi_\text{pub}) =  \phi_\text{pub} + \text{clip}_C(\phi_i - \phi_\text{pub})
+$$
+:::
+
+- which yields the following $\bar{\phi}$;
+
+::: {.fragment}
+$$
+\bar{\phi} =\frac{1}{B}\sum_{i=1}^B \text{DClip}_C(\phi_i, \phi_\text{pub}) =  \phi_\text{pub} + \frac{1}{B}\sum_{i=1}^B \text{clip}_C(\phi_i - \phi_\text{pub})
+$$
+:::
+
+---
+
+The spread of $\phi_i - \phi_\text{pub}$ is observed to be small; hence one can set a smaller $C$ without distorting model outputs (leading to a smaller compute cost $B$!)
+
+![](https://arxiv.org/html/2507.02974v1/x3.png)
+
+## Truncated Top-$k+$ Sampling {.smaller}
+
+- Let $V_k(\phi)$ be the set of tokens that have the Top-$k$ values in logits $\phi$
+- We could set $\bar{V_k} = \cup _{i=1}^B V_k(\phi_i^\text{clip})$ where $\phi_i^\text{clip} = \phi_\text{pub} + \frac{1}{B}\text{clip}_C(\phi_i - \phi_\text{pub})$...
+- ...but that violates DP.
+- However, one can cleverly build a tight superset of $\bar{V_k}$ using just $\phi_\text{pub}$; suppose $l$ is the top-$k$ threshold for $\phi_\text{pub}$. We have that
+ 
+::: {.fragment}
+ $$\phi_\text{pub}(y) - C/B \le \phi_i^\text{clip}(y) \le \phi_\text{pub}(y) + C/B \text{ for all } y \in V$$
+:::
+
+- Observe then that the top-$k$ threshold for $\phi_i^\text{clip}$ is for sure $\geq l - \frac{C}{B}$
+- Therefore, the truncated vocabulary $V^+_k := \left\{y \in V \ : \ \phi_\text{pub}(y) \ge l - \frac{2C}{B}\right\}$ is guaranteed to be a superset of $\bar{V_k}$
+- $V_k^+$ can be shown to be a tight superset, adding fewer than 10 extra tokens.
+- Since $V_k^+$ is independent of any of the $\phi_i$'s, there is no additional privacy cost incurred.
